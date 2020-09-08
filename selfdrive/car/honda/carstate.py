@@ -40,12 +40,16 @@ def get_cam_can_signals():
       ("FRAME_ID", "ADJ_LANE_RIGHT_2", 0),
       ("DASHED_LINE", "CUR_LANE_LEFT_2", 0),
       ("DASHED_LINE", "CUR_LANE_RIGHT_2", 0),
-      ("DASHED_LINE", "ADJ_LANE_LEFT_2", 0),
-      ("DASHED_LINE", "ADJ_LANE_RIGHT_2", 0),
       ("SOLID_LINE", "CUR_LANE_LEFT_2", 0),
       ("SOLID_LINE", "CUR_LANE_RIGHT_2", 0),
-      ("SOLID_LINE", "ADJ_LANE_LEFT_2", 0),
-      ("SOLID_LINE", "ADJ_LANE_RIGHT_2", 0),
+      ("FULL", "CUR_LANE_LEFT_1", 0),
+      ("FULL", "CUR_LANE_LEFT_2", 0),
+      ("FULL", "CUR_LANE_RIGHT_1", 0),
+      ("FULL", "CUR_LANE_RIGHT_2", 0),
+      ("FULL", "ADJ_LANE_LEFT_1", 0),
+      ("FULL", "ADJ_LANE_LEFT_2", 0),
+      ("FULL", "ADJ_LANE_RIGHT_1", 0),
+      ("FULL", "ADJ_LANE_RIGHT_2", 0),
       ("PARM_1", "CUR_LANE_LEFT_1", 0),
       ("PARM_2", "CUR_LANE_LEFT_1", 0),
       ("PARM_3", "CUR_LANE_LEFT_1", 0),
@@ -141,6 +145,7 @@ def get_can_signals(CP):
       ("PEDAL_GAS", "POWERTRAIN_DATA", 0),
       ("CRUISE_SETTING", "SCM_BUTTONS", 0),
       ("ACC_STATUS", "POWERTRAIN_DATA", 0),
+      ("ECON_ON", "XXX_16", 0),
   ]
 
   checks = [
@@ -262,14 +267,15 @@ def get_cam_can_parser(isPandaBlack):
 
 class CarState():
   def __init__(self, CP):
-    self.kegman = kegman_conf()
-    self.trMode = int(self.kegman.conf['lastTrMode'])     # default to last distance interval on startup
+    #self.kegman = kegman_conf()
+    #self.trMode = int(self.kegman.conf['lastTrMode'])     # default to last distance interval on startup
     #self.trMode = 1
     self.lkMode = True
     self.read_distance_lines_prev = 4
     self.CP = CP
     self.can_define = CANDefine(DBC[CP.carFingerprint]['pt'])
     self.shifter_values = self.can_define.dv["GEARBOX"]["GEAR_SHIFTER"]
+    self.brake_pressed = 0
 
     self.user_gas, self.user_gas_pressed = 0., 0
     self.brake_switch_prev = 0
@@ -378,11 +384,12 @@ class CarState():
     self.angle_steers = cp.vl["STEERING_SENSORS"]['STEER_ANGLE']
     self.angle_steers_rate = cp.vl["STEERING_SENSORS"]['STEER_ANGLE_RATE']
 
+    self.econ_on = cp.vl["XXX_16"]["ECON_ON"]
     #self.cruise_setting = cp.vl["SCM_BUTTONS"]['CRUISE_SETTING']
     self.cruise_buttons = cp.vl["SCM_BUTTONS"]['CRUISE_BUTTONS']
 
     if cp.vl["SCM_FEEDBACK"]['LEFT_BLINKER'] or cp.vl["SCM_FEEDBACK"]['RIGHT_BLINKER']:
-      self.blinker_on = 150
+      self.blinker_on = 250
       self.left_blinker_on = cp.vl["SCM_FEEDBACK"]['LEFT_BLINKER']
       self.right_blinker_on = cp.vl["SCM_FEEDBACK"]['RIGHT_BLINKER']
     elif self.blinker_on == 0:
@@ -418,28 +425,30 @@ class CarState():
     self.steer_override = abs(self.steer_torque_driver) > STEER_THRESHOLD[self.CP.carFingerprint]
     self.yaw_rate = cp.vl["KINEMATICS"]["YAW"]
     self.long_accel = cp.vl["KINEMATICS"]["LONG_ACCEL"]
+    
     self.lateral_accel = cp.vl["KINEMATICS"]["LAT_ACCEL"]
 
-    steer_counter = cp.vl["STEER_STATUS"]['COUNTER']
-    if False and not (steer_counter == (self.prev_steering_counter + 1) % 4):
+    steer_counter = cp.vl["STEERING_SENSORS"]['COUNTER']
+    if not (steer_counter == (self.prev_steering_counter + 1) % 4):
       if steer_counter == self.prev_steering_counter:
         self.steer_data_reused += 1
         self.steer_rate_motor = 0.0
-        if self.steer_data_reused % 5 == 0: print("data reused: %d  skipped %d  good %d   %d vs %d" % (self.steer_data_reused, self.steer_data_skipped, self.steer_good_count, steer_counter, (self.prev_steering_counter + 1) % 4))
+        if self.steer_data_reused % 1 == 0: print("data reused: %d  skipped %d  good %d   %d vs %d" % (self.steer_data_reused, self.steer_data_skipped, self.steer_good_count, steer_counter, (self.prev_steering_counter + 1) % 4))
       else:
         self.steer_data_skipped += 1
     else:
       self.steer_good_count += 1
+      if self.steer_good_count % 10000 == 0: print("data reused: %d  skipped %d  good %d   %d vs %d" % (self.steer_data_reused, self.steer_data_skipped, self.steer_good_count, steer_counter, (self.prev_steering_counter + 1) % 4))
     self.prev_steering_counter = steer_counter
 
     self.brake_switch = cp.vl["POWERTRAIN_DATA"]['BRAKE_SWITCH']
-
+  
     if self.CP.radarOffCan:
       self.cruise_mode = cp.vl["ACC_HUD"]['CRUISE_CONTROL_LABEL']
       self.stopped = cp.vl["ACC_HUD"]['CRUISE_SPEED'] == 252.
       self.cruise_speed_offset = calc_cruise_offset(0, self.v_ego)
       if self.CP.carFingerprint in (CAR.CIVIC_BOSCH, CAR.ACCORDH, CAR.INSIGHT, CAR.CRV_HYBRID):
-        if self.brake_pressed and speed > 0:
+        if self.brake_pressed and self.v_ego > 0:
           self.brake_switch = cp.vl["POWERTRAIN_DATA"]['BRAKE_SWITCH']
           self.brake_pressed = cp.vl["POWERTRAIN_DATA"]['BRAKE_PRESSED'] or \
                             (self.brake_switch and self.brake_switch_prev and \
@@ -475,12 +484,12 @@ class CarState():
         self.brake_pressed = 1
 
     # when user presses distance button on steering wheel
-    if self.cruise_setting == 3:
-      if cp.vl["SCM_BUTTONS"]["CRUISE_SETTING"] == 0:
-        self.trMode = (self.trMode + 1 ) % 4
-        self.kegman = kegman_conf()
-        self.kegman.conf['lastTrMode'] = str(self.trMode)   # write last distance bar setting to file
-        self.kegman.write_config(self.kegman.conf)
+    #if self.cruise_setting == 3:
+    #  if cp.vl["SCM_BUTTONS"]["CRUISE_SETTING"] == 0:
+    #    self.trMode = (self.trMode + 1 ) % 4
+    #    self.kegman = kegman_conf()
+    #    self.kegman.conf['lastTrMode'] = str(self.trMode)   # write last distance bar setting to file
+    #    self.kegman.write_config(self.kegman.conf)
 
     # when user presses LKAS button on steering wheel
     if self.cruise_setting == 1:
@@ -492,14 +501,14 @@ class CarState():
 
     self.prev_cruise_setting = self.cruise_setting
     self.cruise_setting = cp.vl["SCM_BUTTONS"]['CRUISE_SETTING']
-    self.read_distance_lines = self.trMode + 1
+    #self.read_distance_lines = self.trMode + 1
 
-    if not self.read_distance_lines == self.read_distance_lines_prev:
-      self.read_distance_lines_prev = self.read_distance_lines
+    #if not self.read_distance_lines == self.read_distance_lines_prev:
+    #  self.read_distance_lines_prev = self.read_distance_lines
 
     # TODO: discover the CAN msg that has the imperial unit bit for all other cars
     self.is_metric = not cp.vl["HUD_SETTING"]['IMPERIAL_UNIT'] if self.CP.carFingerprint in (CAR.CIVIC) else False
-    if not cp_cam is None:
+    '''if not cp_cam is None:
       self.cam_left_1 = cp_cam.vl["CUR_LANE_LEFT_1"]
       self.cam_left_2 = cp_cam.vl["CUR_LANE_LEFT_2"]
       self.cam_right_1 = cp_cam.vl["CUR_LANE_RIGHT_1"]
@@ -509,7 +518,7 @@ class CarState():
       self.cam_far_right_1 = cp_cam.vl["ADJ_LANE_RIGHT_1"]
       self.cam_far_right_2 = cp_cam.vl["ADJ_LANE_RIGHT_2"]
     else:
-      self.cam_left_1 = None
+      self.cam_left_1 = None'''
 
 
 # carstate standalone tester

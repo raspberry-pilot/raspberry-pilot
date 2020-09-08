@@ -26,6 +26,7 @@
 #include "common/swaglog.h"
 #include "common/timing.h"
 
+#include <map>
 #include <algorithm>
 
 // double the FIFO size
@@ -33,6 +34,7 @@
 #define TIMEOUT 0
 
 namespace {
+
 
 volatile sig_atomic_t do_exit = 0;
 
@@ -55,7 +57,9 @@ pthread_t pigeon_thread_handle = -1;
 bool pigeon_needs_init;
 
 int big_recv;
-uint32_t big_data[RECV_SIZE*2];
+uint32_t big_data[RECV_SIZE*4];
+std::map<uint32_t, uint64_t> message_index;
+bool index_initialized = false;
 
 void pigeon_init();
 void *pigeon_thread(void *crap);
@@ -75,19 +79,19 @@ void *safety_setter_thread(void *s) {
   //  }
   //  usleep(100*1000);
   //}
-  printf("got CarVin %s", value_vin);
+  //LOGW("got CarVin %s", value_vin);
 
-  pthread_mutex_lock(&usb_lock);
+  //pthread_mutex_lock(&usb_lock);
 
   // VIN query done, stop listening to OBDII
-  libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::HONDA_BOSCH), 0, NULL, 0, TIMEOUT);
+  //libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::HONDA_BOSCH), 0, NULL, 0, TIMEOUT);
 
-  pthread_mutex_unlock(&usb_lock);
+  //pthread_mutex_unlock(&usb_lock);
 
   char *value;
   size_t value_sz = 0;
 
-  printf("waiting for params to set safety model");
+  LOGW("waiting for params to set safety model");
   while (1) {
     if (do_exit) return NULL;
 
@@ -96,7 +100,7 @@ void *safety_setter_thread(void *s) {
     usleep(100*1000);
   }
 
-  printf("got %d bytes CarParams", value_sz);
+  LOGW("got %d bytes CarParams", value_sz);
 
   // format for board, make copy due to alignment issues, will be freed on out of scope
   auto amsg = kj::heapArray<capnp::word>((value_sz / sizeof(capnp::word)) + 1);
@@ -106,9 +110,18 @@ void *safety_setter_thread(void *s) {
   capnp::FlatArrayMessageReader cmsg(amsg);
   cereal::CarParams::Reader car_params = cmsg.getRoot<cereal::CarParams>();
 
+  auto canIDs = car_params.getCanIds();
+  for (int i=0; i<canIDs.size(); i++) {
+    for (int j=0; j<canIDs[i].size(); j++) {
+      message_index[canIDs[i][j]] = 0;
+      LOGW("message id %d added", canIDs[i][j]);
+    }
+  }
+  index_initialized = true;
+
   auto safety_model = car_params.getSafetyModel();
   auto safety_param = car_params.getSafetyParam();
-  printf("setting safety model: %d with param %d", safety_model, safety_param);
+  LOGW("setting safety model: %d with param %d", safety_model, safety_param);
 
   pthread_mutex_lock(&usb_lock);
 
@@ -118,7 +131,7 @@ void *safety_setter_thread(void *s) {
   // set if long_control is allowed by openpilot. Hardcoded to True for now
   libusb_control_transfer(dev_handle, 0x40, 0xdf, 1, 0, NULL, 0, TIMEOUT);
 
-  libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::HONDA_BOSCH), safety_param, NULL, 0, TIMEOUT);
+  libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)safety_model, safety_param, NULL, 0, TIMEOUT);
 
   pthread_mutex_unlock(&usb_lock);
 
@@ -129,6 +142,9 @@ void *safety_setter_thread(void *s) {
 bool usb_connect() {
   int err;
   unsigned char hw_query[1] = {0};
+  unsigned char serial_buf[16];
+  const char *serial;
+  int serial_sz = 0;
   ignition_last = 0;
 
   dev_handle = libusb_open_device_with_vid_pid(ctx, 0xbbaa, 0xddcc);
@@ -147,6 +163,16 @@ bool usb_connect() {
   // power off ESP
   libusb_control_transfer(dev_handle, 0xc0, 0xd9, 0, 0, NULL, 0, TIMEOUT);
 
+  // get panda serial
+  err = libusb_control_transfer(dev_handle, 0xc0, 0xd0, 0, 0, serial_buf, 16, TIMEOUT);
+
+  if (err > 0) {
+    serial = (const char *)serial_buf;
+    serial_sz = strnlen(serial, err);
+    write_db_value(NULL, "PandaDongleId", serial, serial_sz);
+    LOGW("panda serial: %.*s\n", serial_sz, serial);
+  }
+
   // power on charging, only the first time. Panda can also change mode and it causes a brief disconneciton
 //#ifndef __x86_64__
   if (!connected_once) {
@@ -161,7 +187,7 @@ bool usb_connect() {
   is_pigeon = (hw_type == cereal::HealthData::HwType::GREY_PANDA) ||
               (hw_type == cereal::HealthData::HwType::BLACK_PANDA); 
   if (is_pigeon) {
-    printf("panda with gps detected");
+    LOGW("panda with gps detected");
     pigeon_needs_init = true;
     if (pigeon_thread_handle == -1) {
       err = pthread_create(&pigeon_thread_handle, NULL, pigeon_thread, NULL);
@@ -176,9 +202,9 @@ fail:
 
 
 void usb_retry_connect() {
-  LOG("attempting to connect");
+  LOGW("attempting to connect");
   while (!usb_connect()) { usleep(100*1000); }
-  printf("connected to board");
+  LOGW("connected to board");
 }
 
 void handle_usb_issue(int err, const char func[]) {
@@ -188,6 +214,17 @@ void handle_usb_issue(int err, const char func[]) {
     usb_retry_connect();
   }
   // TODO: check other errors, is simply retrying okay?
+}
+
+uint64_t read_u64_be(const uint8_t* v) {
+  return (((uint64_t)v[0] << 56)
+          | ((uint64_t)v[1] << 48)
+          | ((uint64_t)v[2] << 40)
+          | ((uint64_t)v[3] << 32)
+          | ((uint64_t)v[4] << 24)
+          | ((uint64_t)v[5] << 16)
+          | ((uint64_t)v[6] << 8)
+          | (uint64_t)v[7]);
 }
 
 bool can_recv(void *s, bool force_send) {
@@ -205,7 +242,7 @@ bool can_recv(void *s, bool force_send) {
   do {
     err = libusb_bulk_transfer(dev_handle, 0x81, (uint8_t*)data, RECV_SIZE, &recv, TIMEOUT);
     if (err != 0) { handle_usb_issue(err, __func__); }
-    if (err == -8) { LOGE_100("overflow got 0x%x", recv); };
+    if (err == -8) { LOGW("overflow got 0x%x", recv); };
 
     // timeout is okay to exit, recv still happened
     if (err == -7) { break; }
@@ -214,19 +251,28 @@ bool can_recv(void *s, bool force_send) {
   pthread_mutex_unlock(&usb_lock);
 
   // return if both buffers are empty
-  if ((big_recv <= 0) && (recv <= 0)) {
-    return true;
+  /*if ((big_recv <= 0) && (recv <= 0)) {
+  return true;~
+  }*/
+  if (recv <= 0) {
+    return false;
   }
 
   // TODO: Split bus 0 and 1 into separate packets synced to 330 for bus 0 and 586 for bus 1
-  // TODO: Add CAN filter
   big_index = big_recv/0x10;
+  force_send = false;
+  int j = 0;
   for (int i = 0; i<(recv/0x10); i++) {
-    big_data[(big_index + i)*4] = data[i*4];
-    big_data[(big_index + i)*4+1] = data[i*4+1];
-    big_data[(big_index + i)*4+2] = data[i*4+2];
-    big_data[(big_index + i)*4+3] = data[i*4+3];
-    big_recv += 0x10;
+    auto message = message_index.find(data[i*4] >> 21);
+    if ((message != message_index.end()) | (index_initialized == false)) {
+      if (data[i*4] >> 21 == 330) force_send = true;
+      big_data[(big_index + j)*4] = data[i*4];
+      big_data[(big_index + j)*4+1] = data[i*4+1];
+      big_data[(big_index + j)*4+2] = data[i*4+2];
+      big_data[(big_index + j)*4+3] = data[i*4+3];
+      big_recv += 0x10;    
+      j++;
+    }
   }
   if (force_send) {
     frame_sent = true;
@@ -242,7 +288,7 @@ bool can_recv(void *s, bool force_send) {
       if (big_data[i*4] & 4) {
         // extended
         can_data[i].setAddress(big_data[i*4] >> 3);
-        //printf("got extended: %x\n", big_data[i*4] >> 3);
+        //LOGW("got extended: %x\n", big_data[i*4] >> 3);
       } else {
         // normal
         can_data[i].setAddress(big_data[i*4] >> 21);
@@ -301,7 +347,7 @@ void can_health(void *s) {
 
 //#ifndef __x86_64__
 //  if ((no_ignition_cnt > NO_IGNITION_CNT_MAX) && (health.usb_power_mode == (uint8_t)(cereal::HealthData::UsbPowerMode::CDP))) {
-//    printf("TURN OFF CHARGING!\n");
+//    LOGW("TURN OFF CHARGING!\n");
 //    pthread_mutex_lock(&usb_lock);
 //    libusb_control_transfer(dev_handle, 0xc0, 0xe6, (uint16_t)(cereal::HealthData::UsbPowerMode::CLIENT), 0, NULL, 0, TIMEOUT);
 //    pthread_mutex_unlock(&usb_lock);
@@ -317,9 +363,9 @@ void can_health(void *s) {
     assert((result == 0) || (result == ERR_NO_VALUE));
 
     // diagnostic only is the default, needed for VIN query
-    pthread_mutex_lock(&usb_lock);
-    libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::ELM327), 0, NULL, 0, TIMEOUT);
-    pthread_mutex_unlock(&usb_lock);
+    //pthread_mutex_lock(&usb_lock);
+    //libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::ELM327), 0, NULL, 0, TIMEOUT);
+    //pthread_mutex_unlock(&usb_lock);
 
     if (safety_setter_thread_handle == -1) {
       err = pthread_create(&safety_setter_thread_handle, NULL, safety_setter_thread, NULL);
@@ -428,7 +474,7 @@ void can_send(void *s) {
 // **** threads ****
 
 void *can_send_thread(void *crap) {
-  LOGD("start send thread");
+  LOGW("start send thread");
 
   // sendcan = 8017
   void *context = zmq_ctx_new();
@@ -450,7 +496,7 @@ void *can_send_thread(void *crap) {
 }
 
 void *can_recv_thread(void *crap) {
-  LOGD("start recv thread");
+  LOGW("start recv thread");
 
   // can = 8006
   void *context = zmq_ctx_new();
@@ -460,9 +506,9 @@ void *can_recv_thread(void *crap) {
   bool frame_sent, skip_once, force_send;
   uint64_t wake_time, cur_time, last_long_sleep;
   int recv_state = 0;
-  int long_sleep_us = 4000;
+  int long_sleep_us = 3333;
   int panda_loops = 2;
-  int short_sleep_us = 10000 - (panda_loops * long_sleep_us);
+  int short_sleep_us =  10000 - (panda_loops * long_sleep_us);
   force_send = true;
   last_long_sleep = 1e-3 * nanos_since_boot();
   wake_time = last_long_sleep;
@@ -470,6 +516,7 @@ void *can_recv_thread(void *crap) {
   while (!do_exit) {
 
     frame_sent = can_recv(publisher, force_send);
+    if (frame_sent) recv_state = 0;
 
     // drain the Panda with a sleep, then MAYBE once more if it is ahead of schedule
     if (recv_state++ < panda_loops) {
@@ -491,9 +538,9 @@ void *can_recv_thread(void *crap) {
             if (last_long_sleep < wake_time) {
               usleep(wake_time - last_long_sleep);
             }
-            else {
-              printf("   boardd lagged, skip sleep!\n");
-            }
+            //else {
+            //  LOGW("   boardd lagged, skip sleep! %d\n", recv_state);
+            //}
           }
         }
       }
@@ -512,7 +559,7 @@ void *can_recv_thread(void *crap) {
 }
 
 void *can_health_thread(void *crap) {
-  LOGD("start health thread");
+  LOGW("start health thread");
   // health = 8011
   void *context = zmq_ctx_new();
   void *publisher = zmq_socket(context, ZMQ_PUB);
@@ -520,7 +567,7 @@ void *can_health_thread(void *crap) {
 
   // run at 2hz
   while (!do_exit) {
-    //can_health(publisher);
+    can_health(publisher);
     usleep(500*1000);
   }
   return NULL;
@@ -573,7 +620,7 @@ void pigeon_set_baud(int baud) {
 
 void pigeon_init() {
   usleep(1000*1000);
-  printf("panda GPS start");
+  LOGW("panda GPS start");
 
   // power off pigeon
   pigeon_set_power(0);
@@ -614,7 +661,7 @@ void pigeon_init() {
   pigeon_send("\xB5\x62\x06\x01\x03\x00\x02\x15\x01\x22\x70");
   pigeon_send("\xB5\x62\x06\x01\x03\x00\x02\x13\x01\x20\x6C");
 
-  printf("panda GPS on");
+  LOGW("panda GPS on");
 }
 
 static void pigeon_publish_raw(void *publisher, unsigned char *dat, int alen) {
@@ -646,15 +693,12 @@ void *pigeon_thread(void *crap) {
       pigeon_needs_init = false;
       pigeon_init();
     }
+
+    //pthread_mutex_lock(&usb_lock);	
+    //libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::HONDA_BOSCH), 0, NULL, 0, TIMEOUT);	
+    //pthread_mutex_unlock(&usb_lock);
+
     int alen = 0;
-    
-    pthread_mutex_lock(&usb_lock);
-
-    // VIN query done, stop listening to OBDII
-    libusb_control_transfer(dev_handle, 0x40, 0xdc, (uint16_t)(cereal::CarParams::SafetyModel::HONDA_BOSCH), 0, NULL, 0, TIMEOUT);
-
-    pthread_mutex_unlock(&usb_lock);
-
     while (alen < 0xfc0) {
       pthread_mutex_lock(&usb_lock);
       int len = libusb_control_transfer(dev_handle, 0xc0, 0xe0, 1, 0, dat+alen, 0x40, TIMEOUT);
@@ -662,12 +706,12 @@ void *pigeon_thread(void *crap) {
       pthread_mutex_unlock(&usb_lock);
       if (len <= 0) break;
 
-      //printf("got %d\n", len);
+      //("got %d\n", len);
       alen += len;
     }
     if (alen > 0) {
       if (dat[0] == (char)0x00){
-        printf("received invalid ublox message, resetting panda GPS");
+        LOGW("received invalid ublox message, resetting panda GPS");
         pigeon_init();
       } else {
         pigeon_publish_raw(publisher, dat, alen);
@@ -675,7 +719,7 @@ void *pigeon_thread(void *crap) {
     }
 
     // 10ms
-    usleep(10*1000);
+    usleep(30*1000);
     cnt++;
   }
 
@@ -694,11 +738,11 @@ int set_realtime_priority(int level) {
 
 int main() {
   int err;
-  printf("starting boardd");
+  LOGW("starting boardd");
 
   // set process priority
-  err = set_realtime_priority(4);
-  LOG("setpriority returns %d", err);
+  //err = set_realtime_priority(4);
+  //LOGW("setpriority returns %d", err);
 
   // check the environment
   if (getenv("STARTED")) {

@@ -105,7 +105,8 @@ struct CarState {
   curvatureFactor @39 :Float32;
   curvature @40 :Float32;
   yawRateCAN @41 :Float32;
-  canTime @42 :UInt64;
+  canTime @42 :Float64;
+  sysTime @52 :Float64;
   torqueRequest @43 :Float32;
 
   # gas pedal, 0.0-1.0
@@ -142,6 +143,12 @@ struct CarState {
   camRight @32 :CameraPacket;
   camFarLeft @33 :CameraPacket;
   camFarRight @34 :CameraPacket;
+  econMode @47 :Bool;
+  modelData @48 :List(Float32);
+  adjustedAngle @49 :Float32;
+  centerOffset @50 :Float32;
+  blinkers @51 :Bool;
+  gpsLocation @53 :GpsLocationData;
 
   # lock info
   doorOpen @24 :Bool;
@@ -178,6 +185,59 @@ struct CarState {
     brake @7;
   }
 
+  # android struct GpsLocation
+  struct GpsLocationData {
+    # Contains GpsLocationFlags bits.
+    flags @0 :UInt16;
+
+    # Represents latitude in degrees.
+    latitude @1 :Float64;
+
+    # Represents longitude in degrees.
+    longitude @2 :Float64;
+
+    # Represents altitude in meters above the WGS 84 reference ellipsoid.
+    altitude @3 :Float64;
+
+    # Represents speed in meters per second.
+    speed @4 :Float32;
+
+    # Represents heading in degrees.
+    bearing @5 :Float32;
+
+    # Represents expected accuracy in meters. (presumably 1 sigma?)
+    accuracy @6 :Float32;
+
+    # Timestamp for the location fix.
+    # Milliseconds since January 1, 1970.
+    timestamp @7 :Int64;
+
+    source @8 :SensorSource;
+
+    # Represents NED velocity in m/s.
+    vNED @9 :List(Float32);
+
+    # Represents expected vertical accuracy in meters. (presumably 1 sigma?)
+    verticalAccuracy @10 :Float32;
+
+    # Represents bearing accuracy in degrees. (presumably 1 sigma?)
+    bearingAccuracy @11 :Float32;
+
+    # Represents velocity accuracy in m/s. (presumably 1 sigma?)
+    speedAccuracy @12 :Float32;
+
+    enum SensorSource {
+      android @0;
+      iOS @1;
+      car @2;
+      velodyne @3;  # Velodyne IMU
+      fusion @4;
+      external @5;
+      ublox @6;
+      trimble @7;
+    }
+  }
+
   struct CameraPacket {
     parm1 @0 :Int16;
     parm2 @1 :Int16;
@@ -189,9 +249,14 @@ struct CarState {
     parm8 @7 :Int16;
     parm9 @8 :Int16;
     parm10 @9 :Int16;
+    parm11 @13 :Int16;
+    parm12 @14 :Int16;
+    parm13 @15 :Int16;
     frame @10 :Int16;
     solid @11 :Int16;
     dashed @12 :Int16;
+    full1 @16 :UInt64;
+    full2 @17 :UInt64;
   }
 
   lateralControlState :union {
@@ -199,7 +264,6 @@ struct CarState {
     pidState @45 :LateralPIDState;
     lqrState @46 :LateralLQRState;
   }
-
 
   struct LateralINDIState {
     active @0 :Bool;
@@ -416,12 +480,13 @@ struct CarParams {
   steerControlType @34 :SteerControlType;
   radarOffCan @35 :Bool; # True when radar objects aren't visible on CAN
 
+  canIds @43 :List(List(UInt32));
   epsSteerRateFactor @42 :Float32;
   steerActuatorDelay @36 :Float32; # Steering wheel actuator delay in seconds
   steerAdvanceCycles @41 :Int16;
   openpilotLongitudinalControl @37 :Bool; # is openpilot doing the longitudinal control?
   carVin @38 :Text; # VIN number queried during fingerprinting
-  isPandaBlack @39: Bool;
+  isPandaBlack @39 :Bool;
 
   struct LateralPIDTuning {
     kpBP @0 :List(Float32);
@@ -429,7 +494,7 @@ struct CarParams {
     kiBP @2 :List(Float32);
     kiV @3 :List(Float32);
     kf @4 :Float32;
-    dampTime @5 :Float32;
+    dampSteer @5 :Float32;
     reactMPC @6 :Float32;
     dampMPC @7 :Float32;
     rateFFGain@8 :Float32;
@@ -438,6 +503,7 @@ struct CarParams {
     polyReactTime @11 :Float32;
     polyScale @12 :List(List(Float32));
     steerPscale @13 :List(List(Float32));
+    reactSteer @14 :Float32;
   }
 
   struct LongitudinalPIDTuning {

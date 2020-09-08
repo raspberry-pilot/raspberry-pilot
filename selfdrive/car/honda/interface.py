@@ -1,11 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 
 import os
 import time
+import json
 import numpy as np
 from cereal import car, log
 from common.numpy_fast import clip, interp
 from common.realtime import sec_since_boot, DT_CTRL
 from selfdrive.swaglog import cloudlog
+from common.params import Params
 from selfdrive.config import Conversions as CV
 from selfdrive.controls.lib.drive_helpers import create_event, EventTypes as ET, get_events
 #from selfdrive.controls.lib.vehicle_model import VehicleModel
@@ -85,6 +87,7 @@ class CarInterface(CarInterfaceBase):
 
     self.cp = get_can_parser(CP)
     self.cp_cam = get_cam_can_parser(CP.isPandaBlack)
+    self.CP.canIds = [[int(x) for x in self.cp.addr], [int(x) for x in self.cp_cam.addr]]
 
     # *** init the major players ***
     self.CS = CarState(CP)
@@ -93,7 +96,6 @@ class CarInterface(CarInterfaceBase):
     self.CC = None
     if CarController is not None:
       self.CC = CarController(self.cp.dbc_name)
-
     if self.CS.CP.carFingerprint == CAR.ACURA_ILX:
       self.compute_gb = get_compute_gb_acura()
     else:
@@ -170,7 +172,7 @@ class CarInterface(CarInterfaceBase):
     ret.lateralTuning.init('pid')
     ret.lateralTuning.pid.kiBP, ret.lateralTuning.pid.kpBP = [[0.], [0.]]
     ret.lateralTuning.pid.kf = 0.00006 # conservative feed-forward
-    ret.lateralTuning.pid.dampTime = 0.02
+    ret.lateralTuning.pid.dampSteer = 0.02
     ret.lateralTuning.pid.reactMPC = 0.0
     ret.lateralTuning.pid.dampMPC = 0.25
     ret.lateralTuning.pid.rateFFGain = 0.4
@@ -197,7 +199,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [3.6, 2.4, 1.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.54, 0.36]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
       #ret.epsSteerRateFactor = -0.08
 
@@ -215,7 +217,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
       #ret.epsSteerRateFactor = -0.12
       #ret.lateralTuning.pid.steerPscale = [[1.0, 2.0, 10.0], [1.0, 0.5, 0.25], [1.0, 0.75, 0.5]]  # [abs angles, scale UP, scale DOWN]
@@ -233,7 +235,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
       ret.lateralTuning.pid.rateFFGain = 0.4
       #ret.epsSteerRateFactor = -0.08
@@ -250,7 +252,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
       #ret.epsSteerRateFactor = -0.1375
 
@@ -267,7 +269,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
 
     elif candidate == CAR.CRV_HYBRID:
@@ -283,7 +285,7 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalTuning.kpV = [1.2, 0.8, 0.5]
       ret.longitudinalTuning.kiBP = [0., 35.]
       ret.longitudinalTuning.kiV = [0.18, 0.12]
-      ret.lateralTuning.pid.dampTime = 0.1
+      ret.lateralTuning.pid.dampSteer = 0.1
       ret.lateralTuning.pid.reactMPC = 0.0
       ret.steerLimitAlert = False
 
@@ -416,25 +418,33 @@ class CarInterface(CarInterfaceBase):
     return ret
 
   # returns a car.CarState
-  def update(self, c, can_strings, lac_log):
+  def update(self, c, can_strings, lac_log, profiler):
     # ******************* do can recv *******************
-    self.canTime = max(int(time.time() * 100) * 10, self.canTime + 10)
+    ret = car.CarState.new_message()
+    ret.lateralControlState.init('pidState')
+    ret.sysTime = int(time.time() * 1000)
+    if self.canTime == 0: 
+      self.canTime = int(time.time() * 100) * 10
+    elif self.canTime < ret.sysTime + 20:
+      self.canTime = self.canTime + 10
+    ret.canTime = self.canTime
+    #self.canTime = max(int(time.time() * 100) * 10, self.canTime + 10)
     #if self.frame % 100 == 0: print(self.canTime)
 
     self.cp.update_strings(can_strings)
-    self.cp.update(0, False)
+    profiler.checkpoint('cp_update')
+    #self.cp.update(0, False)
     if not self.cp_cam is None: 
       self.cp_cam.update_strings(can_strings)
+      profiler.checkpoint('cp_cam_update')
       #self.cp_cam.update(0, False)
 
     self.CS.update(self.cp, self.cp_cam)
-    #print(self.cp_cam.vl)
+    profiler.checkpoint('cs_update')
+
     # create message
-    ret = car.CarState.new_message()
-    ret.lateralControlState.init('pidState')
     #print(len(can_strings), can_strings)
     #can_strings = log.Event.from_bytes(can_strings[0])
-    ret.canTime = self.canTime
     ret.canValid = self.cp.can_valid
     if not lac_log is None:
       ret.torqueRequest = lac_log.output
@@ -492,63 +502,91 @@ class CarInterface(CarInterfaceBase):
     ret.cruiseState.available = bool(self.CS.main_on) and not bool(self.CS.cruise_mode)
     ret.cruiseState.speedOffset = self.CS.cruise_speed_offset
     ret.cruiseState.standstill = False
-
-    ret.readdistancelines = self.CS.read_distance_lines
+    profiler.checkpoint('interface')
+    #ret.readdistancelines = self.CS.read_distance_lines
     ret.lkMode = self.CS.lkMode
 
     if not self.cp_cam is None:
-      ret.camLeft.parm1 = self.CS.cam_left_1['PARM_1']
-      ret.camLeft.parm2 = self.CS.cam_left_1['PARM_2']
-      ret.camLeft.parm3 = self.CS.cam_left_1['PARM_3']
-      ret.camLeft.parm4 = self.CS.cam_left_1['PARM_4']
-      ret.camLeft.parm5 = self.CS.cam_left_1['PARM_5']
-      ret.camLeft.parm6 = self.CS.cam_left_2['PARM_6']
-      ret.camLeft.parm7 = self.CS.cam_left_2['PARM_7']
-      ret.camLeft.parm8 = self.CS.cam_left_2['PARM_8']
-      ret.camLeft.parm9 = self.CS.cam_left_2['PARM_9']
-      ret.camLeft.parm10 = self.CS.cam_left_2['PARM_10']
-      ret.camLeft.dashed = self.CS.cam_left_2['DASHED_LINE']
-      ret.camLeft.solid = self.CS.cam_left_2['SOLID_LINE']
-      ret.camLeft.frame = self.CS.cam_left_1['FRAME_ID'] + self.CS.cam_left_2['FRAME_ID']
-      ret.camRight.parm1 = self.CS.cam_right_1['PARM_1']
-      ret.camRight.parm2 = self.CS.cam_right_1['PARM_2']
-      ret.camRight.parm3 = self.CS.cam_right_1['PARM_3']
-      ret.camRight.parm4 = self.CS.cam_right_1['PARM_4']
-      ret.camRight.parm5 = self.CS.cam_right_1['PARM_5']
-      ret.camRight.parm6 = self.CS.cam_right_2['PARM_6']
-      ret.camRight.parm7 = self.CS.cam_right_2['PARM_7']
-      ret.camRight.parm8 = self.CS.cam_right_2['PARM_8']
-      ret.camRight.parm9 = self.CS.cam_right_2['PARM_9']
-      ret.camRight.parm10 = self.CS.cam_right_2['PARM_10']
-      ret.camRight.dashed = self.CS.cam_right_2['DASHED_LINE']
-      ret.camRight.solid = self.CS.cam_right_2['SOLID_LINE']
-      ret.camRight.frame = self.CS.cam_right_1['FRAME_ID'] + self.CS.cam_right_2['FRAME_ID']
-      ret.camFarLeft.parm1 = self.CS.cam_far_left_1['PARM_1']
-      ret.camFarLeft.parm2 = self.CS.cam_far_left_1['PARM_2']
-      ret.camFarLeft.parm3 = self.CS.cam_far_left_1['PARM_3']
-      ret.camFarLeft.parm4 = self.CS.cam_far_left_1['PARM_4']
-      ret.camFarLeft.parm5 = self.CS.cam_far_left_1['PARM_5']
-      ret.camFarLeft.parm6 = self.CS.cam_far_left_2['PARM_6']
-      ret.camFarLeft.parm7 = self.CS.cam_far_left_2['PARM_7']
-      ret.camFarLeft.parm8 = self.CS.cam_far_left_2['PARM_8']
-      ret.camFarLeft.parm9 = self.CS.cam_far_left_2['PARM_9']
-      ret.camFarLeft.parm10 = self.CS.cam_far_left_2['PARM_10']
-      ret.camFarLeft.dashed = self.CS.cam_far_left_2['DASHED_LINE']
-      ret.camFarLeft.solid = self.CS.cam_far_left_2['SOLID_LINE']
-      ret.camFarLeft.frame = self.CS.cam_far_left_1['FRAME_ID'] + self.CS.cam_far_left_2['FRAME_ID']
-      ret.camFarRight.parm1 = self.CS.cam_far_right_1['PARM_1']
-      ret.camFarRight.parm2 = self.CS.cam_far_right_1['PARM_2']
-      ret.camFarRight.parm3 = self.CS.cam_far_right_1['PARM_3']
-      ret.camFarRight.parm4 = self.CS.cam_far_right_1['PARM_4']
-      ret.camFarRight.parm5 = self.CS.cam_far_right_1['PARM_5']
-      ret.camFarRight.parm6 = self.CS.cam_far_right_2['PARM_6']
-      ret.camFarRight.parm7 = self.CS.cam_far_right_2['PARM_7']
-      ret.camFarRight.parm8 = self.CS.cam_far_right_2['PARM_8']
-      ret.camFarRight.parm9 = self.CS.cam_far_right_2['PARM_9']
-      ret.camFarRight.parm10 = self.CS.cam_far_right_2['PARM_10']
-      ret.camFarRight.dashed = self.CS.cam_far_right_2['DASHED_LINE']
-      ret.camFarRight.solid = self.CS.cam_far_right_2['SOLID_LINE']
-      ret.camFarRight.frame = self.CS.cam_far_right_1['FRAME_ID'] + self.CS.cam_far_right_2['FRAME_ID']
+      camLeft1 = self.cp_cam.vl["CUR_LANE_LEFT_1"]
+      camLeft2 = self.cp_cam.vl["CUR_LANE_LEFT_2"]
+      camFarRight1 = self.cp_cam.vl["ADJ_LANE_RIGHT_1"]
+      camFarRight2 = self.cp_cam.vl["ADJ_LANE_RIGHT_2"]
+      ret.camLeft.frame = camLeft1['FRAME_ID'] + camLeft2['FRAME_ID']
+      ret.camFarRight.frame = camFarRight1['FRAME_ID'] + camFarRight2['FRAME_ID']
+
+      if ret.camLeft.frame != self.stock_cam_frame_prev and ret.camLeft.frame == ret.camFarRight.frame:
+        self.stock_cam_frame_prev = ret.camLeft.frame
+        camRight1 = self.cp_cam.vl["CUR_LANE_RIGHT_1"]
+        camRight2 = self.cp_cam.vl["CUR_LANE_RIGHT_2"]
+        camFarLeft1 = self.cp_cam.vl["ADJ_LANE_LEFT_1"]
+        camFarLeft2 = self.cp_cam.vl["ADJ_LANE_LEFT_2"]
+
+        ret.camRight.frame = camRight1['FRAME_ID'] + camRight2['FRAME_ID']
+        ret.camFarLeft.frame = camFarLeft1['FRAME_ID'] + camFarLeft2['FRAME_ID']
+        ret.camLeft.full1 = camLeft1['FULL']
+        ret.camLeft.full2 = camLeft2['FULL']
+        ret.camRight.full1 = camRight1['FULL']
+        ret.camRight.full2 = camRight2['FULL']
+        ret.camFarLeft.full1 = camFarLeft1['FULL']
+        ret.camFarLeft.full2 = camFarLeft2['FULL']
+        ret.camFarRight.full1 = camFarRight1['FULL']
+        ret.camFarRight.full2 = camFarRight2['FULL']
+        ret.camLeft.parm1 = camLeft1['PARM_1']
+        ret.camLeft.parm2 = camLeft1['PARM_2']
+        ret.camLeft.parm3 = camLeft1['PARM_3']
+        ret.camLeft.parm4 = camLeft1['PARM_4']
+        ret.camLeft.parm5 = camLeft1['PARM_5']
+        ret.camLeft.parm6 = camLeft2['PARM_6']
+        ret.camLeft.parm7 = camLeft2['PARM_7']
+        ret.camLeft.parm8 = camLeft2['PARM_8']
+        ret.camLeft.parm9 = camLeft2['PARM_9']
+        ret.camLeft.parm10 = camLeft2['PARM_10']
+        ret.camLeft.dashed = camLeft2['DASHED_LINE']
+        ret.camLeft.solid = camLeft2['SOLID_LINE']
+        ret.camRight.parm1 = camRight1['PARM_1']
+        ret.camRight.parm2 = camRight1['PARM_2']
+        ret.camRight.parm3 = camRight1['PARM_3']
+        ret.camRight.parm4 = camRight1['PARM_4']
+        ret.camRight.parm5 = camRight1['PARM_5']
+        ret.camRight.parm6 = camRight2['PARM_6']
+        ret.camRight.parm7 = camRight2['PARM_7']
+        ret.camRight.parm8 = camRight2['PARM_8']
+        ret.camRight.parm9 = camRight2['PARM_9']
+        ret.camRight.parm10 = camRight2['PARM_10']
+        ret.camRight.dashed = camRight2['DASHED_LINE']
+        ret.camRight.solid = camRight2['SOLID_LINE']
+        ret.camFarLeft.parm1 = camFarLeft1['PARM_1']
+        ret.camFarLeft.parm2 = camFarLeft1['PARM_2']
+        ret.camFarLeft.parm3 = camFarLeft1['PARM_3']
+        ret.camFarLeft.parm4 = camFarLeft1['PARM_4']
+        ret.camFarLeft.parm5 = camFarLeft1['PARM_5']
+        ret.camFarLeft.parm6 = camFarLeft2['PARM_6']
+        ret.camFarLeft.parm7 = camFarLeft2['PARM_7']
+        ret.camFarLeft.parm8 = camFarLeft2['PARM_8']
+        ret.camFarLeft.parm9 = camFarLeft2['PARM_9']
+        ret.camFarLeft.parm10 = camFarLeft2['PARM_10']
+        ret.camFarRight.parm1 = camFarRight1['PARM_1']
+        ret.camFarRight.parm2 = camFarRight1['PARM_2']
+        ret.camFarRight.parm3 = camFarRight1['PARM_3']
+        ret.camFarRight.parm4 = camFarRight1['PARM_4']
+        ret.camFarRight.parm5 = camFarRight1['PARM_5']
+        ret.camFarRight.parm6 = camFarRight2['PARM_6']
+        ret.camFarRight.parm7 = camFarRight2['PARM_7']
+        ret.camFarRight.parm8 = camFarRight2['PARM_8']
+        ret.camFarRight.parm9 = camFarRight2['PARM_9']
+        ret.camFarRight.parm10 = camFarRight2['PARM_10']
+
+        # TODO: Fix these values in the DBC
+        ret.camLeft.parm2 = ret.camLeft.parm2 if ret.camLeft.parm2 > -150 else ret.camLeft.parm2 + 1024
+        ret.camLeft.parm10 = ret.camLeft.parm10 if ret.camLeft.parm10 > -10 else ret.camLeft.parm10 + 128
+        ret.camFarLeft.parm2 = ret.camFarLeft.parm2 if ret.camFarLeft.parm2 > -150 else ret.camFarLeft.parm2 + 1024
+        ret.camFarLeft.parm10 = ret.camFarLeft.parm10 if ret.camFarLeft.parm10 > -10 else ret.camFarLeft.parm10 + 128
+        ret.camRight.parm2 = ret.camRight.parm2 if ret.camRight.parm2 < 150 else ret.camRight.parm2 - 1024
+        ret.camRight.parm10 = ret.camRight.parm10 if ret.camRight.parm10 < 10 else ret.camRight.parm10 - 128
+        ret.camFarRight.parm2 = ret.camFarRight.parm2 if ret.camFarRight.parm2 < 150 else ret.camFarRight.parm2 - 1024
+        ret.camFarRight.parm10 = ret.camFarRight.parm10 if ret.camFarRight.parm10 < 10 else ret.camFarRight.parm10 - 128
+      profiler.checkpoint('update_cam')
+      #if self.frame % 1000 == 0: print(self.cp_cam.vl["CUR_LANE_LEFT_1"]['FULL'],self.cp_cam.vl["CUR_LANE_LEFT_2"]['FULL'],self.cp_cam.vl["CUR_LANE_RIGHT_1"]['FULL'],self.cp_cam.vl["CUR_LANE_RIGHT_2"]['FULL'])
       #print(self.cp_cam.vl["CUR_LANE_LEFT_1"]['FRAME_ID'], )
     
     #if ret.camLeft.parm2 < -100:
@@ -559,7 +597,7 @@ class CarInterface(CarInterfaceBase):
     #ret.camRight.parm2 += 512
     #if ret.camFarLeft.parm2 < 0:
     #  ret.camFarLeft.parm2 += 2048
-    #ret.camFarLeft.parm2 -= 1024
+    #ret.camFarLeft.parm2 -= 1024 
     #if ret.camFarRight.parm2 > 0:
     #  ret.camFarRight.parm2 -= 2048
     #ret.camFarRight.parm2 += 1024
@@ -567,8 +605,10 @@ class CarInterface(CarInterfaceBase):
 
     # TODO: button presses
     buttonEvents = []
+    ret.econMode = bool(self.CS.econ_on)
     ret.leftBlinker = bool(self.CS.left_blinker_on)
     ret.rightBlinker = bool(self.CS.right_blinker_on)
+    ret.blinkers = bool(self.CS.blinker_on)
 
     ret.doorOpen = not self.CS.door_all_closed
     ret.seatbeltUnlatched = not self.CS.seatbelt
@@ -634,7 +674,7 @@ class CarInterface(CarInterfaceBase):
       events.append(create_event('steerTempUnavailable', [ET.WARNING]))
     if self.CS.brake_error:
       events.append(create_event('brakeUnavailable', [ET.NO_ENTRY, ET.IMMEDIATE_DISABLE, ET.PERMANENT]))
-    if not ret.gearShifter == 'drive':
+    if not ret.gearShifter in ['drive', 'sport', 'low']:
       events.append(create_event('wrongGear', [ET.NO_ENTRY, ET.SOFT_DISABLE]))
     if ret.doorOpen:
       events.append(create_event('doorOpen', [ET.NO_ENTRY, ET.SOFT_DISABLE]))
@@ -707,10 +747,11 @@ class CarInterface(CarInterfaceBase):
     # update previous brake/gas pressed
     self.gas_pressed_prev = ret.gasPressed
     self.brake_pressed_prev = ret.brakePressed
+    profiler.checkpoint('create_events')
 
 
     # cast to reader so it can't be modified
-    return ret.as_reader()
+    return ret
 
   # pass in a car.CarControl
   # to be called @ 100hz
@@ -725,6 +766,7 @@ class CarInterface(CarInterfaceBase):
 
     pcm_accel = int(clip(c.cruiseControl.accelOverride, 0, 1) * 0xc6)
 
+    #time.sleep(0.00001)
     can_sends = self.CC.update(c.enabled, self.CS, self.frame,
                                c.actuators,
                                c.cruiseControl.speedOverride,

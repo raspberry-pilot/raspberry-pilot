@@ -705,7 +705,7 @@ struct PathPlan {
   pPoly @20 :List(Float32);
   pProb @21 :Float32;
 
-  canTime @25 :UInt64;
+  canTime @25 :Float64;
   angleSteers @8 :Float32; # deg
   rateSteers @13 :Float32; # deg/s
   mpcSolutionValid @9 :Bool;
@@ -722,6 +722,14 @@ struct PathPlan {
   sensorValid @14 :Bool;
   commIssue @15 :Bool;
   posenetValid @16 :Bool;
+  slowAngles @27 :List(Float32);
+  fastAngles @28 :List(List(Float32));
+  leftError @29 :List(Float32);
+  rightError @30 :List(Float32);
+  centerError @31 :List(Float32);
+  sysTime @32 :UInt64;
+  centerCompensation @33 :Float32;
+  modelIndex @34 :Int16;
 }
 
 struct LiveLocationData {
@@ -1804,7 +1812,7 @@ struct Event {
     ubloxGnss @34 :UbloxGnss;
     clocks @35 :Clocks;
     liveMpc @36 :LiveMpcData;
-    liveLongitudinalMpc @37 :LiveLongitudinalMpcData;
+    liveLongitudinalMpc @37 :LiveLongitudinalMpcData; 
     navStatus @38 :NavStatus;
     ubloxRaw @39 :Data;
     gpsPlannerPoints @40 :GPSPlannerPoints;
