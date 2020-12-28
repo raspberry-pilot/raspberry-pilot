@@ -78,9 +78,9 @@ ansible localhost -v -b -m apt -a "autoremove=yes"
 echo "Installing dependencies.."
 sudo apt install -y build-essential make python3.7-dev python3-pip libzmq3-dev python3-zmq
 sudo apt install -y openjdk-8-jdk automake zip unzip libtool swig libpng-dev pkg-config
-sudo apt install -y libhdf5-dev clang libarchive-dev  
+sudo apt install -y libhdf5-dev clang libarchive-dev
 sudo apt install -y libssl-dev libswscale-dev
-sudo apt install -y libusb-1.0-0 libusb-1.0-0-dev ocl-icd-libopencl1 ocl-icd-opencl-dev 
+sudo apt install -y libusb-1.0-0 libusb-1.0-0-dev ocl-icd-libopencl1 ocl-icd-opencl-dev
 sudo apt install -y opencl-headers checkinstall
 sudo apt install -y clang-3.8 libatlas-base-dev libopenblas-base libopenblas-dev gfortran
 sudo apt install -y capnproto uuid-dev libsodium-dev valgrind
@@ -107,6 +107,10 @@ sudo apt install -y influxdb influxdb-client apt-transport-https adduser dfu-uti
 echo "Changing the default python.."
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python2.7 1
 sudo update-alternatives --install /usr/bin/python python /usr/bin/python3.7 2
+sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.7 3
+
+# fix apt_pkg missing error due to python3 breaking it :)
+sudo cp /usr/lib/python3/dist-packages/apt_pkg.cpython-*-aarch64-linux-gnu.so /usr/lib/python3/dist-packages/apt_pkg.so
 
 # start grafana and influxdb (installed but temporarily disabled to reduce resource usage)
 sudo /bin/systemctl daemon-reload
@@ -119,26 +123,32 @@ sudo /bin/systemctl daemon-reload
 # ansible localhost -b -m service -a "name=influxdb enabled=yes"
 # ansible localhost -b -m service -a "name=influxdb state=started"
 
-# Install the TensorFlow 2.2 components and dependencies
-wget https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.2.0/tensorflow-2.2.0-cp37-none-linux_aarch64.whl
+# Install the TensorFlow 2.3 components and dependencies
+wget https://github.com/lhelontra/tensorflow-on-arm/releases/download/v2.3.0/tensorflow-2.3.0-cp37-none-linux_aarch64.whl
 python3.7 -m pip install -U pip
 python3.7 -m pip install -U pyzmq
 python3.7 -m pip install cython
-python3.7 -m pip install tensorflow-2.2.0-cp37-none-linux_aarch64.whl
+python3.7 -m pip install tensorflow-2.3.0-cp37-none-linux_aarch64.whl
 python3.7 -m pip install sklearn
 python3.7 -m pip install pyzmq
-python3.7 -m pip install pycapnp 
+python3.7 -m pip install pkgconfig
+python3.7 -m pip install pycapnp
 python3.7 -m pip install setproctitle
 python3.7 -m pip install cffi
 python3.7 -m pip install cython
 python3.7 -m pip install pandacan
+python3.7 -m pip install pycrypto
+python3.7 -m pip install pycryptodome
 
-# Create folders for storing various hdf5 files; supports switching models via remote ssh commands
+# Create folders for storing various hdf5 files; supports switching models via remote ssh commands (DEPRECATED)
 mkdir ~/buttons
 mkdir ~/buttons/model-1
 mkdir ~/buttons/model-2
 mkdir ~/buttons/model-3
 mkdir ~/buttons/model-4
+
+# restore ~/raspilot/models
+mkdir ~/raspilot/models
 
 # Kick off the final stage of the build
 cd

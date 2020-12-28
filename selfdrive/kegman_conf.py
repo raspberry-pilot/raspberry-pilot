@@ -59,7 +59,7 @@ class kegman_conf():
     self.element_updated = False
 
     if Reset or not os.path.isfile(os.path.expanduser('~/kegman.json')):
-      self.config = {"Kp":"-1","Ki":"-1","Kf":"-1","rateFFGain":"-1","reactMPC":"-1","dampMPC":"-1","useAutoFlash": "0","useInfluxDB":"0","requireBlinker":"1","requireNudge":"1"}
+      self.config = {"Kp":"-1","Ki":"-1","Kf":"-1","rateFFGain":"-1","reactMPC":"-1","dampMPC":"-1","useAutoFlash": "0","useInfluxDB":"0","requireBlinker":"1","requireNudge":"1","autoUpload":"0"}
       self.element_updated = True
     else:
       with open(os.path.expanduser('~/kegman.json'), 'r') as f:
@@ -101,6 +101,10 @@ class kegman_conf():
         self.config.update({key: value})
         self.element_updated = True
 
+    if not CP is None and ("fingerprint" not in self.config or self.config['fingerprint'] != CP.carFingerprint):
+      self.config.update({"fingerprint": CP.carFingerprint})
+      self.element_updated = True
+
     if "discreteAngle" not in self.config:
       self.config.update({"discreteAngle": "1"})
       self.element_updated = True
@@ -134,6 +138,21 @@ class kegman_conf():
 
     if "wiggleAngle" not in self.config:
       self.config.update({"wiggleAngle": "0.2"})
+      self.element_updated = True
+
+    if "accelLimit" not in self.config:
+      self.config.update({"accelLimit": "0.2"})
+      self.element_updated = True
+
+    if "widthFactor" not in self.config:
+      self.config.update({"speedFactor": "1.0"})
+      self.config.update({"lateralFactor": "1.0"})
+      self.config.update({"yawFactor": "1.0"})
+      self.config.update({"steerFactor": "1.0"})
+      self.element_updated = True
+
+    if "rateFFGain" not in self.config:
+      self.config.update({"rateFFGain": "0.4"})
       self.element_updated = True
 
     if "firstModel" not in self.config:
